@@ -9,6 +9,10 @@
     "start": "node app.js"
   },
   "jest": {
+    "coverageReporters": [
+      "text",
+      "lcov"
+    ],
     "coverageThreshold":{
       "global": {
         "branches": 60,
