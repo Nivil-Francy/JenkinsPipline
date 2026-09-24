@@ -86,7 +86,16 @@ pipeline {
 
                 sh 'npm run lint'
 
-                echo 'Code quality gate passed.'
+                echo 'Running SonarCloud analysis...'
+
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('SonarCloud') {
+                       sh "${scannerHome}/bin/sonar-scanner"
+                    }
+                }
+                echo 'SonarCloud analysis and quality gate completed successfully'
             }
         }
 
