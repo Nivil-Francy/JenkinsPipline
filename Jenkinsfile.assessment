@@ -1,55 +1,284 @@
 pipeline {
     agent any
 
+    environment {
+        APP_NAME = 'jenkins-assessment'
+        IMAGE_NAME = 'jenkins-assessment'
+
+        STAGING_CONTAINER = 'jenkins-assessment-staging'
+        PRODUCTION_CONTAINER = 'jenkins-assessment-production'
+
+        STAGING_PORT = '3001'
+        PRODUCTION_PORT = '3000'
+    }
+
     stages {
 
+        // =========================================================
+        // 1. BUILD
+        // =========================================================
         stage('Build') {
             steps {
-                echo 'Task: Build and package the Node.js application'
-                echo 'Tool: npm'
+                echo '=== BUILD STAGE ==='
+
+                echo 'Checking installed tools...'
+                sh 'node --version'
+                sh 'npm --version'
+                sh 'docker --version'
+
+                echo 'Installing project dependencies...'
+                sh 'npm ci'
+
+                echo 'Building versioned Docker image...'
+                sh '''
+                    docker build \
+                        -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        -t ${IMAGE_NAME}:latest .
+                '''
+
+                echo "Docker image created: ${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                echo 'Saving Docker image as build artefact...'
+                sh '''
+                    docker save ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        -o ${IMAGE_NAME}-${BUILD_NUMBER}.tar
+                '''
+
+                archiveArtifacts artifacts: "${IMAGE_NAME}-${BUILD_NUMBER}.tar",
+                                 fingerprint: true
             }
         }
 
-        stage('Unit and Integration Tests') {
+
+        // =========================================================
+        // 2. TEST
+        // =========================================================
+        stage('Test') {
             steps {
-                echo 'Task: Run unit and integration tests'
-                echo 'Tool: Jest'
+                echo '=== TEST STAGE ==='
+
+                echo 'Running automated unit and API integration tests...'
+
+                sh 'npm test -- --coverage'
+            }
+
+            post {
+                always {
+                    echo 'Archiving test coverage...'
+
+                    archiveArtifacts artifacts: 'coverage/**',
+                                     allowEmptyArchive: true
+                }
             }
         }
 
-        stage('Code Analysis') {
+
+        // =========================================================
+        // 3. CODE QUALITY
+        // =========================================================
+        stage('Code Quality') {
             steps {
-                echo 'Task: Analyse the source code for coding standards'
-                echo 'Tool: ESLint'
+                echo '=== CODE QUALITY STAGE ==='
+
+                echo 'Running ESLint static code analysis...'
+
+                sh 'npm run lint'
+
+                echo 'Code quality gate passed.'
             }
         }
 
-        stage('Security Scan') {
+
+        // =========================================================
+        // 4. SECURITY
+        // =========================================================
+        stage('Security') {
             steps {
-                echo 'Task: Scan the application for known vulnerabilities'
-                echo 'Tool: npm audit'
+                echo '=== SECURITY STAGE ==='
+
+                echo 'Running npm dependency security audit...'
+
+                sh 'npm audit --audit-level=high'
+
+                echo 'Security gate passed.'
             }
         }
 
+
+        // =========================================================
+        // 5. DEPLOY TO STAGING
+        // =========================================================
         stage('Deploy to Staging') {
             steps {
-                echo 'Task: Deploy the application to the staging server'
-                echo 'Tool: AWS EC2'
+                echo '=== STAGING DEPLOYMENT ==='
+
+                echo 'Removing previous staging container if it exists...'
+
+                sh '''
+                    docker rm -f ${STAGING_CONTAINER} 2>/dev/null || true
+                '''
+
+                echo 'Deploying application to staging...'
+
+                sh '''
+                    docker run -d \
+                        --name ${STAGING_CONTAINER} \
+                        -p ${STAGING_PORT}:3000 \
+                        -e NODE_ENV=staging \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
+                '''
+
+                echo 'Waiting for staging application...'
+
+                sh 'sleep 5'
+
+                echo 'Running staging health check...'
+
+                sh '''
+                    curl --fail \
+                        --max-time 10 \
+                        http://localhost:${STAGING_PORT}/health
+                '''
+
+                echo 'Staging deployment successful.'
             }
         }
 
-        stage('Integration Tests on Staging') {
+
+        // =========================================================
+        // 6. RELEASE TO PRODUCTION
+        // =========================================================
+        stage('Release to Production') {
             steps {
-                echo 'Task: Run integration tests on the staging environment'
-                echo 'Tool: Jest'
+                echo '=== PRODUCTION RELEASE ==='
+
+                echo "Creating release version ${BUILD_NUMBER}..."
+
+                sh '''
+                    docker tag \
+                        ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        ${IMAGE_NAME}:release-${BUILD_NUMBER}
+                '''
+
+                echo "Deploying release-${BUILD_NUMBER} to production..."
+
+                sh '''
+                    docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
+
+                    docker run -d \
+                        --name ${PRODUCTION_CONTAINER} \
+                        -p ${PRODUCTION_PORT}:3000 \
+                        -e NODE_ENV=production \
+                        ${IMAGE_NAME}:release-${BUILD_NUMBER}
+                '''
+
+                echo 'Waiting for production application...'
+
+                sh 'sleep 5'
+
+                echo 'Running production health check...'
+
+                sh '''
+                    curl --fail \
+                        --max-time 10 \
+                        http://localhost:${PRODUCTION_PORT}/health
+                '''
+
+                echo "Production release ${BUILD_NUMBER} deployed successfully."
             }
         }
 
-        stage('Deploy to Production') {
+
+        // =========================================================
+        // 7. MONITORING
+        // =========================================================
+        stage('Monitoring') {
             steps {
-                echo 'Task: Deploy the application to the production server'
-                echo 'Tool: AWS EC2'
+                echo '=== MONITORING STAGE ==='
+
+                echo 'Checking production health...'
+
+                sh '''
+                    curl --fail \
+                        --max-time 10 \
+                        http://localhost:${PRODUCTION_PORT}/health
+                '''
+
+                echo 'Checking production API...'
+
+                sh '''
+                    curl --fail \
+                        --max-time 10 \
+                        http://localhost:${PRODUCTION_PORT}/api/status
+                '''
+
+                echo 'Production monitoring checks passed.'
+
+                echo 'Starting incident simulation...'
+
+                sh '''
+                    echo "Stopping production container to simulate an incident..."
+
+                    docker stop ${PRODUCTION_CONTAINER}
+
+                    echo "Checking whether the monitoring check detects the failure..."
+
+                    if curl --silent --fail \
+                        --max-time 5 \
+                        http://localhost:${PRODUCTION_PORT}/health
+                    then
+                        echo "WARNING: Production health check unexpectedly succeeded."
+                    else
+                        echo "ALERT: Production application is unavailable."
+                    fi
+
+                    echo "Recovering production service..."
+
+                    docker start ${PRODUCTION_CONTAINER}
+
+                    sleep 5
+
+                    echo "Verifying service recovery..."
+
+                    curl --fail \
+                        --max-time 10 \
+                        http://localhost:${PRODUCTION_PORT}/health
+
+                    echo "INCIDENT RECOVERY: Production service restored."
+                '''
             }
+        }
+    }
+
+
+    // =============================================================
+    // PIPELINE RESULT
+    // =============================================================
+    post {
+
+        success {
+            echo '''
+========================================
+CI/CD PIPELINE COMPLETED SUCCESSFULLY
+========================================
+'''
+        }
+
+        failure {
+            echo '''
+========================================
+CI/CD PIPELINE FAILED
+========================================
+A build, test, quality, security,
+deployment, release or monitoring
+gate failed.
+========================================
+'''
+        }
+
+        always {
+            echo "Build Number: ${BUILD_NUMBER}"
+            echo "Application: ${APP_NAME}"
         }
     }
 }
