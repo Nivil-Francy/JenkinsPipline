@@ -97,16 +97,22 @@ pipeline {
         stage('Security') {
             steps {
                 echo '=== SECURITY STAGE ==='
-
                 echo 'Running npm dependency security audit...'
-
                 sh 'npm audit --audit-level=high'
+                echo 'Dependency security audit passed.'
+                echo 'Running Docker image vulnerability scan with Trivy...'
 
-                echo 'Security gate passed.'
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:latest image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
+                '''
+                echo 'Trivy security scan passed.'
             }
         }
-
-
         // =========================================================
         // 5. DEPLOY TO STAGING
         // =========================================================
