@@ -2,6 +2,8 @@ pipeline {
     agent any
 
     environment {
+        PATH = "/opt/homebrew/bin:/Users/nivilfrancy/.docker/bin:${env.PATH}"
+
         APP_NAME = 'jenkins-assessment'
         IMAGE_NAME = 'jenkins-assessment'
 
