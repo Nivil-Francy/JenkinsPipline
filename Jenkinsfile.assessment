@@ -164,7 +164,7 @@ pipeline {
 
         // =========================================================
         // 6. RELEASE TO PRODUCTION
-        // =========================================================
+        // ========================================================= 
         stage('Release to Production') {
             steps {
                 echo '=== PRODUCTION RELEASE ==='
@@ -177,35 +177,82 @@ pipeline {
                         ${IMAGE_NAME}:release-${BUILD_NUMBER}
                 '''
 
-                echo "Deploying release-${BUILD_NUMBER} to production..."
+                script {
+                    def previousImage = sh(
+                        script: """
+                            docker inspect \
+                                --format='{{.Config.Image}}' \
+                                ${PRODUCTION_CONTAINER} 2>/dev/null || true
+                        """,
+                        returnStdout: true
+                    ).trim()
 
-                sh '''
-                    docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
+                    echo "Previous production image: ${previousImage ?: 'None'}"
 
-                    docker run -d \
-                        --name ${PRODUCTION_CONTAINER} \
-                        -p ${PRODUCTION_PORT}:3000 \
-                        -e NODE_ENV=production \
-                        ${IMAGE_NAME}:release-${BUILD_NUMBER}
-                '''
+                    try {
+                        echo "Deploying release-${BUILD_NUMBER} to production..."
 
-                echo 'Waiting for production application...'
+                        sh '''
+                            docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
 
-                sh 'sleep 5'
+                            docker run -d \
+                                --name ${PRODUCTION_CONTAINER} \
+                                -p ${PRODUCTION_PORT}:3000 \
+                                -e NODE_ENV=production \
+                                ${IMAGE_NAME}:release-${BUILD_NUMBER}
+                        '''
 
-                echo 'Running production health check...'
+                        echo 'Waiting for production application...'
+                        sh 'sleep 5'
 
-                sh '''
-                    curl --fail \
-                        --max-time 10 \
-                        http://localhost:${PRODUCTION_PORT}/health
-                '''
+                        echo 'Running production health check...'
 
-                echo "Production release ${BUILD_NUMBER} deployed successfully."
-            }
+                        sh '''
+                            curl --fail \
+                                --max-time 10 \
+                                http://localhost:${PRODUCTION_PORT}/health
+                        '''
+
+                        echo "Production release ${BUILD_NUMBER} deployed successfully."
+
+                    } catch (Exception deploymentError) {
+
+                       echo 'PRODUCTION DEPLOYMENT FAILED'
+                       echo 'Starting automated rollback...'
+
+                       if (previousImage) {
+
+                          sh '''
+                               docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
+
+                               docker run -d \
+                                   --name ${PRODUCTION_CONTAINER} \
+                                   -p ${PRODUCTION_PORT}:3000 \
+                                   -e NODE_ENV=production \
+                                   ${previousImage}
+                          '''
+
+                          sh 'sleep 5'
+
+                          sh '''
+                              curl --fail \
+                                 --max-time 10 \
+                                 http://localhost:${PRODUCTION_PORT}/health
+                          '''
+
+                          echo 'AUTOMATED ROLLBACK SUCCESSFUL'
+                          echo "Restored previous image: ${previousImage}"
+
+                      } else {
+                          echo 'No previous production image available for rollback.'
+                      }
+
+                      throw deploymentError
+                 }
+              }
+           }
         }
-
-
+    
         // =========================================================
         // 7. MONITORING
         // =========================================================
