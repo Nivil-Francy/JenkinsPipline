@@ -1,190 +1,215 @@
 pipeline {
-    agent any
+agent any
+environment {
+    PATH = "/opt/homebrew/bin:/Users/nivilfrancy/.docker/bin:${env.PATH}"
 
-    environment {
-        PATH = "/opt/homebrew/bin:/Users/nivilfrancy/.docker/bin:${env.PATH}"
+    APP_NAME = 'jenkins-assessment'
+    IMAGE_NAME = 'jenkins-assessment'
 
-        APP_NAME = 'jenkins-assessment'
-        IMAGE_NAME = 'jenkins-assessment'
+    STAGING_CONTAINER = 'jenkins-assessment-staging'
+    PRODUCTION_CONTAINER = 'jenkins-assessment-production'
 
-        STAGING_CONTAINER = 'jenkins-assessment-staging'
-        PRODUCTION_CONTAINER = 'jenkins-assessment-production'
+    STAGING_PORT = '3001'
+    PRODUCTION_PORT = '3000'
+}
 
-        STAGING_PORT = '3001'
-        PRODUCTION_PORT = '3000'
+stages {
+
+    stage('Build') {
+        steps {
+            echo '=== BUILD STAGE ==='
+
+            echo 'Checking installed tools...'
+
+            sh 'node --version'
+            sh 'npm --version'
+            sh 'docker --version'
+
+            echo 'Installing project dependencies...'
+
+            sh 'npm ci'
+
+            echo 'Building versioned Docker image...'
+
+            sh '''
+                docker build \
+                    -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                    -t ${IMAGE_NAME}:latest .
+            '''
+
+            echo "Docker image created: ${IMAGE_NAME}:${BUILD_NUMBER}"
+
+            echo 'Saving Docker image as build artefact...'
+
+            sh '''
+                docker save ${IMAGE_NAME}:${BUILD_NUMBER} \
+                    -o ${IMAGE_NAME}-${BUILD_NUMBER}.tar
+            '''
+
+            archiveArtifacts artifacts: "${IMAGE_NAME}-${BUILD_NUMBER}.tar",
+                             fingerprint: true
+        }
     }
 
-    stages {
+    stage('Test') {
+        steps {
+            echo '=== TEST STAGE ==='
 
-        stage('Build') {
-            steps {
-                echo '=== BUILD STAGE ==='
+            echo 'Running automated unit and API integration tests...'
 
-                echo 'Checking installed tools...'
-
-                sh 'node --version'
-                sh 'npm --version'
-                sh 'docker --version'
-
-                echo 'Installing project dependencies...'
-
-                sh 'npm ci'
-
-                echo 'Building versioned Docker image...'
-
-                sh '''
-                    docker build \
-                        -t ${IMAGE_NAME}:${BUILD_NUMBER} \
-                        -t ${IMAGE_NAME}:latest .
-                '''
-
-                echo "Docker image created: ${IMAGE_NAME}:${BUILD_NUMBER}"
-
-                echo 'Saving Docker image as build artefact...'
-
-                sh '''
-                    docker save ${IMAGE_NAME}:${BUILD_NUMBER} \
-                        -o ${IMAGE_NAME}-${BUILD_NUMBER}.tar
-                '''
-
-                archiveArtifacts artifacts: "${IMAGE_NAME}-${BUILD_NUMBER}.tar",
-                                 fingerprint: true
-            }
+            sh 'npm test -- --coverage'
         }
 
+        post {
+            always {
+                echo 'Archiving test coverage...'
 
-        stage('Test') {
-            steps {
-                echo '=== TEST STAGE ==='
-
-                echo 'Running automated unit and API integration tests...'
-
-                sh 'npm test -- --coverage'
+                archiveArtifacts artifacts: 'coverage/**',
+                                 allowEmptyArchive: true
             }
+        }
+    }
 
-            post {
-                always {
-                    echo 'Archiving test coverage...'
+    stage('Code Quality') {
+        steps {
+            echo '=== CODE QUALITY STAGE ==='
 
-                    archiveArtifacts artifacts: 'coverage/**',
-                                     allowEmptyArchive: true
+            echo 'Running ESLint static code analysis...'
+
+            sh 'npm run lint'
+
+            script {
+                def scannerHome = tool 'SonarScanner'
+
+                withSonarQubeEnv('SonarCloud') {
+                    sh "${scannerHome}/bin/sonar-scanner"
                 }
             }
+
+            echo 'SonarCloud analysis completed successfully.'
         }
+    }
 
+    stage('Security') {
+        steps {
+            echo '=== SECURITY STAGE ==='
 
-        stage('Code Quality') {
-            steps {
-                echo '=== CODE QUALITY STAGE ==='
+            echo 'Running npm dependency security audit...'
 
-                echo 'Running ESLint static code analysis...'
+            sh 'npm audit --audit-level=high'
 
-                sh 'npm run lint'
+            echo 'Dependency security audit passed.'
 
-                script {
-                    def scannerHome = tool 'SonarScanner'
+            echo 'Running Docker image vulnerability scan with Trivy...'
 
-                    withSonarQubeEnv('SonarCloud') {
-                        sh "${scannerHome}/bin/sonar-scanner"
-                    }
-                }
+            sh '''
+                docker run --rm \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    aquasec/trivy:latest image \
+                    --severity HIGH,CRITICAL \
+                    --exit-code 1 \
+                    ${IMAGE_NAME}:${BUILD_NUMBER}
+            '''
 
-                echo 'SonarCloud analysis and quality gate completed successfully'
-            }
+            echo 'Trivy security scan passed.'
         }
+    }
 
+    stage('Deploy to Staging') {
+        steps {
+            echo '=== STAGING DEPLOYMENT ==='
 
-        stage('Security') {
-            steps {
-                echo '=== SECURITY STAGE ==='
+            echo 'Removing previous staging container if it exists...'
 
-                echo 'Running npm dependency security audit...'
+            sh '''
+                docker rm -f ${STAGING_CONTAINER} 2>/dev/null || true
+            '''
 
-                sh 'npm audit --audit-level=high'
+            echo 'Deploying application to staging...'
 
-                echo 'Dependency security audit passed.'
+            sh '''
+                docker run -d \
+                    --name ${STAGING_CONTAINER} \
+                    -p ${STAGING_PORT}:3000 \
+                    -e NODE_ENV=staging \
+                    ${IMAGE_NAME}:${BUILD_NUMBER}
+            '''
 
-                echo 'Running Docker image vulnerability scan with Trivy...'
+            echo 'Waiting for staging application...'
 
-                sh '''
-                    docker run --rm \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
-                        aquasec/trivy:latest image \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 1 \
-                        ${IMAGE_NAME}:${BUILD_NUMBER}
-                '''
+            sh 'sleep 5'
 
-                echo 'Trivy security scan passed.'
-            }
+            echo 'Running staging health check...'
+
+            sh '''
+                curl --fail \
+                    --max-time 10 \
+                    http://localhost:${STAGING_PORT}/health
+            '''
+
+            echo 'Staging deployment successful.'
         }
+    }
 
+    stage('Release to Production') {
+        steps {
+            echo '=== PRODUCTION RELEASE ==='
 
-        stage('Deploy to Staging') {
-            steps {
-                echo '=== STAGING DEPLOYMENT ==='
+            echo "Creating release version ${BUILD_NUMBER}..."
 
-                echo 'Removing previous staging container if it exists...'
+            sh '''
+                docker tag \
+                    ${IMAGE_NAME}:${BUILD_NUMBER} \
+                    ${IMAGE_NAME}:release-${BUILD_NUMBER}
+            '''
 
-                sh '''
-                    docker rm -f ${STAGING_CONTAINER} 2>/dev/null || true
-                '''
+            script {
 
-                echo 'Deploying application to staging...'
+                def previousImage = sh(
+                    script: """
+                        docker inspect \
+                            --format='{{.Config.Image}}' \
+                            ${PRODUCTION_CONTAINER} 2>/dev/null || true
+                    """,
+                    returnStdout: true
+                ).trim()
 
-                sh '''
-                    docker run -d \
-                        --name ${STAGING_CONTAINER} \
-                        -p ${STAGING_PORT}:3000 \
-                        -e NODE_ENV=staging \
-                        ${IMAGE_NAME}:${BUILD_NUMBER}
-                '''
+                echo "Previous production image: ${previousImage ?: 'None'}"
 
-                echo 'Waiting for staging application...'
+                try {
 
-                sh 'sleep 5'
+                    echo "Deploying release-${BUILD_NUMBER} to production..."
 
-                echo 'Running staging health check...'
+                    sh '''
+                        docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
 
-                sh '''
-                    curl --fail \
-                        --max-time 10 \
-                        http://localhost:${STAGING_PORT}/health
-                '''
+                        docker run -d \
+                            --name ${PRODUCTION_CONTAINER} \
+                            -p ${PRODUCTION_PORT}:3000 \
+                            -e NODE_ENV=production \
+                            ${IMAGE_NAME}:release-${BUILD_NUMBER}
+                    '''
 
-                echo 'Staging deployment successful.'
-            }
-        }
+                    echo 'Waiting for production application...'
 
+                    sh 'sleep 5'
 
-        stage('Release to Production') {
-            steps {
-                echo '=== PRODUCTION RELEASE ==='
+                    echo 'Running production health check...'
 
-                echo "Creating release version ${BUILD_NUMBER}..."
+                    sh '''
+                        curl --fail \
+                            --max-time 10 \
+                            http://localhost:${PRODUCTION_PORT}/health
+                    '''
 
-                sh '''
-                    docker tag \
-                        ${IMAGE_NAME}:${BUILD_NUMBER} \
-                        ${IMAGE_NAME}:release-${BUILD_NUMBER}
-                '''
+                    echo "Production release ${BUILD_NUMBER} deployed successfully."
 
-                script {
+                } catch (Exception deploymentError) {
 
-                    def previousImage = sh(
-                        script: """
-                            docker inspect \
-                                --format='{{.Config.Image}}' \
-                                ${PRODUCTION_CONTAINER} 2>/dev/null || true
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    echo 'PRODUCTION DEPLOYMENT FAILED'
+                    echo 'Starting automated rollback...'
 
-                    echo "Previous production image: ${previousImage ?: 'None'}"
-
-                    try {
-
-                        echo "Deploying release-${BUILD_NUMBER} to production..."
+                    if (previousImage) {
 
                         sh '''
                             docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
@@ -193,14 +218,10 @@ pipeline {
                                 --name ${PRODUCTION_CONTAINER} \
                                 -p ${PRODUCTION_PORT}:3000 \
                                 -e NODE_ENV=production \
-                                ${IMAGE_NAME}:release-${BUILD_NUMBER}
+                                ${previousImage}
                         '''
 
-                        echo 'Waiting for production application...'
-
                         sh 'sleep 5'
-
-                        echo 'Running production health check...'
 
                         sh '''
                             curl --fail \
@@ -208,191 +229,160 @@ pipeline {
                                 http://localhost:${PRODUCTION_PORT}/health
                         '''
 
-                        echo "Production release ${BUILD_NUMBER} deployed successfully."
-
-                    } catch (Exception deploymentError) {
-
-                        echo 'PRODUCTION DEPLOYMENT FAILED'
-                        echo 'Starting automated rollback...'
-
-                        if (previousImage) {
-
-                            sh '''
-                                docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
-
-                                docker run -d \
-                                    --name ${PRODUCTION_CONTAINER} \
-                                    -p ${PRODUCTION_PORT}:3000 \
-                                    -e NODE_ENV=production \
-                                    ${previousImage}
-                            '''
-
-                            sh 'sleep 5'
-
-                            sh '''
-                                curl --fail \
-                                    --max-time 10 \
-                                    http://localhost:${PRODUCTION_PORT}/health
-                            '''
-
-                            echo 'AUTOMATED ROLLBACK SUCCESSFUL'
-                            echo "Restored previous image: ${previousImage}"
-
-                        } else {
-
-                            echo 'No previous production image available for rollback.'
-                        }
-
-                        throw deploymentError
-                    }
-                }
-            }
-        }
-
-
-        stage('Monitoring') {
-            steps {
-                echo '=== MONITORING STAGE ==='
-
-                echo 'Checking production health...'
-
-                sh '''
-                    curl --fail \
-                        --max-time 10 \
-                        http://localhost:${PRODUCTION_PORT}/health
-                '''
-
-                echo 'Checking production API...'
-
-                sh '''
-                    curl --fail \
-                        --max-time 10 \
-                        http://localhost:${PRODUCTION_PORT}/api/status
-                '''
-
-                script {
-
-                    echo 'Collecting production performance metrics...'
-
-                    def responseTimes = []
-
-                    for (int i = 1; i <= 5; i++) {
-
-                        def responseTime = sh(
-                            script: """
-                                curl -s -o /dev/null \
-                                    -w '%{time_total}' \
-                                    --max-time 10 \
-                                    http://localhost:${PRODUCTION_PORT}/health
-                            """,
-                            returnStdout: true
-                        ).trim()
-
-                        def responseMs = responseTime.toDouble() * 1000
-
-                        responseTimes.add(responseMs)
-
-                        echo "Metric sample ${i}: ${responseMs} ms"
-                    }
-
-                    def averageResponse =
-                        responseTimes.sum() / responseTimes.size()
-
-                    def maximumResponse =
-                        responseTimes.max()
-
-                    echo "Average response time: ${averageResponse} ms"
-
-                    echo "Maximum response time: ${maximumResponse} ms"
-
-                    echo 'Alert threshold: 1000 ms'
-
-                    if (maximumResponse > 1000) {
-
-                        error "ALERT: Response time exceeded 1000 ms"
+                        echo 'AUTOMATED ROLLBACK SUCCESSFUL'
+                        echo "Restored previous image: ${previousImage}"
 
                     } else {
 
-                        echo 'ALERT RULE PASSED: Response time is below 1000 ms'
+                        echo 'No previous production image available for rollback.'
                     }
+
+                    throw deploymentError
                 }
-
-                echo 'Collecting Docker resource metrics...'
-
-                sh '''
-                    docker stats --no-stream \
-                        --format "CPU={{.CPUPerc}} MEM={{.MemUsage}} MEM_PCT={{.MemPerc}}" \
-                        ${PRODUCTION_CONTAINER}
-                '''
-
-                echo 'Production monitoring checks passed.'
-
-                echo 'Starting incident simulation...'
-
-                sh '''
-                    echo "Stopping production container to simulate an incident..."
-
-                    docker stop ${PRODUCTION_CONTAINER}
-
-                    echo "Checking whether the monitoring check detects the failure..."
-
-                    if curl --silent --fail \
-                        --max-time 5 \
-                        http://localhost:${PRODUCTION_PORT}/health
-                    then
-
-                        echo "WARNING: Production health check unexpectedly succeeded."
-
-                    else
-
-                        echo "ALERT: Production application is unavailable."
-
-                    fi
-
-                    echo "Recovering production service..."
-
-                    docker start ${PRODUCTION_CONTAINER}
-
-                    sleep 5
-
-                    echo "Verifying service recovery..."
-
-                    curl --fail \
-                        --max-time 10 \
-                        http://localhost:${PRODUCTION_PORT}/health
-
-                    echo "INCIDENT RECOVERY: Production service restored."
-                '''
             }
         }
     }
 
+    stage('Monitoring') {
+        steps {
+            echo '=== MONITORING STAGE ==='
 
-    post {
+            echo 'Checking production health...'
 
-        success {
-            echo '''
-========================================
-CI/CD PIPELINE COMPLETED SUCCESSFULLY
-========================================
-'''
-        }
+            sh '''
+                curl --fail \
+                    --max-time 10 \
+                    http://localhost:${PRODUCTION_PORT}/health
+            '''
 
-        failure {
-            echo '''
-========================================
-CI/CD PIPELINE FAILED
-========================================
-A build, test, quality, security,
-deployment, release or monitoring
-gate failed.
-========================================
-'''
-        }
+            echo 'Checking production API...'
 
-        always {
-            echo "Build Number: ${BUILD_NUMBER}"
-            echo "Application: ${APP_NAME}"
+            sh '''
+                curl --fail \
+                    --max-time 10 \
+                    http://localhost:${PRODUCTION_PORT}/api/status
+            '''
+
+            echo 'Collecting production performance metrics...'
+
+            sh '''
+                response_times=""
+
+                for i in 1 2 3 4 5
+                do
+                    response_time=$(curl -s \
+                        -o /dev/null \
+                        -w '%{time_total}' \
+                        --max-time 10 \
+                        http://localhost:${PRODUCTION_PORT}/health)
+
+                    response_ms=$(awk "BEGIN {printf \"%.2f\", $response_time * 1000}")
+
+                    echo "Metric sample $i: $response_ms ms"
+
+                    response_times="$response_times $response_ms"
+                done
+
+                average=$(awk '{
+                    sum=0
+                    count=0
+
+                    for (i=1; i<=NF; i++) {
+                        sum += $i
+                        count++
+                    }
+
+                    printf "%.2f", sum/count
+                }' <<< "$response_times")
+
+                maximum=$(awk '{
+                    max=$1
+
+                    for (i=2; i<=NF; i++) {
+                        if ($i > max) {
+                            max=$i
+                        }
+                    }
+
+                    printf "%.2f", max
+                }' <<< "$response_times")
+
+                echo "Average response time: $average ms"
+                echo "Maximum response time: $maximum ms"
+                echo "Alert threshold: 1000 ms"
+
+                if awk "BEGIN {exit !($maximum > 1000)}"
+                then
+                    echo "ALERT: Response time exceeded 1000 ms"
+                    exit 1
+                else
+                    echo "ALERT RULE PASSED: Response time is below 1000 ms"
+                fi
+            '''
+
+            echo 'Collecting Docker resource metrics...'
+
+            sh '''
+                docker stats --no-stream \
+                    --format "CPU={{.CPUPerc}} MEM={{.MemUsage}} MEM_PCT={{.MemPerc}}" \
+                    ${PRODUCTION_CONTAINER}
+            '''
+
+            echo 'Production monitoring checks passed.'
+
+            echo 'Starting incident simulation...'
+
+            sh '''
+                echo "Stopping production container to simulate an incident..."
+
+                docker stop ${PRODUCTION_CONTAINER}
+
+                echo "Checking whether the monitoring check detects the failure..."
+
+                if curl --silent --fail \
+                    --max-time 5 \
+                    http://localhost:${PRODUCTION_PORT}/health
+                then
+
+                    echo "WARNING: Production health check unexpectedly succeeded."
+
+                else
+
+                    echo "ALERT: Production application is unavailable."
+
+                fi
+
+                echo "Recovering production service..."
+
+                docker start ${PRODUCTION_CONTAINER}
+
+                sleep 5
+
+                echo "Verifying service recovery..."
+
+                curl --fail \
+                    --max-time 10 \
+                    http://localhost:${PRODUCTION_PORT}/health
+
+                echo "INCIDENT RECOVERY: Production service restored."
+            '''
         }
     }
+}
+
+post {
+
+    success {
+        echo '''
+'''
+}
+    failure {
+        echo '''
+'''
+}
+    always {
+        echo "Build Number: ${BUILD_NUMBER}"
+        echo "Application: ${APP_NAME}"
+    }
+}
 }
