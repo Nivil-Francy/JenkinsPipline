@@ -276,14 +276,16 @@ stages {
                         --max-time 10 \
                         http://localhost:${PRODUCTION_PORT}/health)
 
-                    response_ms=$(awk "BEGIN {printf \"%.2f\", $response_time * 1000}")
+                    response_ms=$(awk -v time="$response_time" 'BEGIN {printf "%.2f", time * 1000}')
 
                     echo "Metric sample $i: $response_ms ms"
 
                     response_times="$response_times $response_ms"
                 done
 
-                average=$(awk '{
+                echo "Calculating performance statistics..."
+
+                average=$(printf '%s\n' "$response_times" | awk '{
                     sum=0
                     count=0
 
@@ -292,10 +294,12 @@ stages {
                         count++
                     }
 
-                    printf "%.2f", sum/count
-                }' <<< "$response_times")
+                    if (count > 0) {
+                        printf "%.2f", sum/count
+                    }
+                }')
 
-                maximum=$(awk '{
+                maximum=$(printf '%s\n' "$response_times" | awk '{
                     max=$1
 
                     for (i=2; i<=NF; i++) {
@@ -305,13 +309,13 @@ stages {
                     }
 
                     printf "%.2f", max
-                }' <<< "$response_times")
+                }')
 
                 echo "Average response time: $average ms"
                 echo "Maximum response time: $maximum ms"
                 echo "Alert threshold: 1000 ms"
 
-                if awk "BEGIN {exit !($maximum > 1000)}"
+                if awk -v max="$maximum" 'BEGIN {exit !(max > 1000)}'
                 then
                     echo "ALERT: Response time exceeded 1000 ms"
                     exit 1
