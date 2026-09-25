@@ -16,22 +16,22 @@ pipeline {
 
     stages {
 
-        // =========================================================
-        // 1. BUILD
-        // =========================================================
         stage('Build') {
             steps {
                 echo '=== BUILD STAGE ==='
 
                 echo 'Checking installed tools...'
+
                 sh 'node --version'
                 sh 'npm --version'
                 sh 'docker --version'
 
                 echo 'Installing project dependencies...'
+
                 sh 'npm ci'
 
                 echo 'Building versioned Docker image...'
+
                 sh '''
                     docker build \
                         -t ${IMAGE_NAME}:${BUILD_NUMBER} \
@@ -41,6 +41,7 @@ pipeline {
                 echo "Docker image created: ${IMAGE_NAME}:${BUILD_NUMBER}"
 
                 echo 'Saving Docker image as build artefact...'
+
                 sh '''
                     docker save ${IMAGE_NAME}:${BUILD_NUMBER} \
                         -o ${IMAGE_NAME}-${BUILD_NUMBER}.tar
@@ -52,9 +53,6 @@ pipeline {
         }
 
 
-        // =========================================================
-        // 2. TEST
-        // =========================================================
         stage('Test') {
             steps {
                 echo '=== TEST STAGE ==='
@@ -75,9 +73,6 @@ pipeline {
         }
 
 
-        // =========================================================
-        // 3. CODE QUALITY
-        // =========================================================
         stage('Code Quality') {
             steps {
                 echo '=== CODE QUALITY STAGE ==='
@@ -86,29 +81,29 @@ pipeline {
 
                 sh 'npm run lint'
 
-                echo 'Running SonarCloud analysis...'
-
                 script {
                     def scannerHome = tool 'SonarScanner'
 
                     withSonarQubeEnv('SonarCloud') {
-                       sh "${scannerHome}/bin/sonar-scanner"
+                        sh "${scannerHome}/bin/sonar-scanner"
                     }
                 }
+
                 echo 'SonarCloud analysis and quality gate completed successfully'
             }
         }
 
 
-        // =========================================================
-        // 4. SECURITY
-        // =========================================================
         stage('Security') {
             steps {
                 echo '=== SECURITY STAGE ==='
+
                 echo 'Running npm dependency security audit...'
+
                 sh 'npm audit --audit-level=high'
+
                 echo 'Dependency security audit passed.'
+
                 echo 'Running Docker image vulnerability scan with Trivy...'
 
                 sh '''
@@ -119,12 +114,12 @@ pipeline {
                         --exit-code 1 \
                         ${IMAGE_NAME}:${BUILD_NUMBER}
                 '''
+
                 echo 'Trivy security scan passed.'
             }
         }
-        // =========================================================
-        // 5. DEPLOY TO STAGING
-        // =========================================================
+
+
         stage('Deploy to Staging') {
             steps {
                 echo '=== STAGING DEPLOYMENT ==='
@@ -162,9 +157,6 @@ pipeline {
         }
 
 
-        // =========================================================
-        // 6. RELEASE TO PRODUCTION
-        // ========================================================= 
         stage('Release to Production') {
             steps {
                 echo '=== PRODUCTION RELEASE ==='
@@ -178,6 +170,7 @@ pipeline {
                 '''
 
                 script {
+
                     def previousImage = sh(
                         script: """
                             docker inspect \
@@ -190,6 +183,7 @@ pipeline {
                     echo "Previous production image: ${previousImage ?: 'None'}"
 
                     try {
+
                         echo "Deploying release-${BUILD_NUMBER} to production..."
 
                         sh '''
@@ -203,6 +197,7 @@ pipeline {
                         '''
 
                         echo 'Waiting for production application...'
+
                         sh 'sleep 5'
 
                         echo 'Running production health check...'
@@ -217,48 +212,48 @@ pipeline {
 
                     } catch (Exception deploymentError) {
 
-                       echo 'PRODUCTION DEPLOYMENT FAILED'
-                       echo 'Starting automated rollback...'
+                        echo 'PRODUCTION DEPLOYMENT FAILED'
+                        echo 'Starting automated rollback...'
 
-                       if (previousImage) {
+                        if (previousImage) {
 
-                          sh '''
-                               docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
+                            sh '''
+                                docker rm -f ${PRODUCTION_CONTAINER} 2>/dev/null || true
 
-                               docker run -d \
-                                   --name ${PRODUCTION_CONTAINER} \
-                                   -p ${PRODUCTION_PORT}:3000 \
-                                   -e NODE_ENV=production \
-                                   ${previousImage}
-                          '''
+                                docker run -d \
+                                    --name ${PRODUCTION_CONTAINER} \
+                                    -p ${PRODUCTION_PORT}:3000 \
+                                    -e NODE_ENV=production \
+                                    ${previousImage}
+                            '''
 
-                          sh 'sleep 5'
+                            sh 'sleep 5'
 
-                          sh '''
-                              curl --fail \
-                                 --max-time 10 \
-                                 http://localhost:${PRODUCTION_PORT}/health
-                          '''
+                            sh '''
+                                curl --fail \
+                                    --max-time 10 \
+                                    http://localhost:${PRODUCTION_PORT}/health
+                            '''
 
-                          echo 'AUTOMATED ROLLBACK SUCCESSFUL'
-                          echo "Restored previous image: ${previousImage}"
+                            echo 'AUTOMATED ROLLBACK SUCCESSFUL'
+                            echo "Restored previous image: ${previousImage}"
 
-                      } else {
-                          echo 'No previous production image available for rollback.'
-                      }
+                        } else {
 
-                      throw deploymentError
-                 }
-              }
-           }
+                            echo 'No previous production image available for rollback.'
+                        }
+
+                        throw deploymentError
+                    }
+                }
+            }
         }
-    
-        // =========================================================
-        // 7. MONITORING
-        // =========================================================
+
+
         stage('Monitoring') {
             steps {
                 echo '=== MONITORING STAGE ==='
+
                 echo 'Checking production health...'
 
                 sh '''
@@ -276,11 +271,13 @@ pipeline {
                 '''
 
                 script {
+
                     echo 'Collecting production performance metrics...'
 
                     def responseTimes = []
 
                     for (int i = 1; i <= 5; i++) {
+
                         def responseTime = sh(
                             script: """
                                 curl -s -o /dev/null \
@@ -292,22 +289,30 @@ pipeline {
                         ).trim()
 
                         def responseMs = responseTime.toDouble() * 1000
+
                         responseTimes.add(responseMs)
 
                         echo "Metric sample ${i}: ${responseMs.round(2)} ms"
                     }
 
-                    def averageResponse = responseTimes.sum() / responseTimes.size()
-                    def maximumResponse = responseTimes.max()
+                    def averageResponse =
+                        responseTimes.sum() / responseTimes.size()
+
+                    def maximumResponse =
+                        responseTimes.max()
 
                     echo "Average response time: ${averageResponse.round(2)} ms"
+
                     echo "Maximum response time: ${maximumResponse.round(2)} ms"
 
                     echo 'Alert threshold: 1000 ms'
 
                     if (maximumResponse > 1000) {
+
                         error "ALERT: Response time exceeded 1000 ms"
+
                     } else {
+
                         echo 'ALERT RULE PASSED: Response time is below 1000 ms'
                     }
                 }
@@ -332,12 +337,16 @@ pipeline {
                     echo "Checking whether the monitoring check detects the failure..."
 
                     if curl --silent --fail \
-                       --max-time 5 \
-                       http://localhost:${PRODUCTION_PORT}/health
+                        --max-time 5 \
+                        http://localhost:${PRODUCTION_PORT}/health
                     then
-                       echo "WARNING: Production health check unexpectedly succeeded."
+
+                        echo "WARNING: Production health check unexpectedly succeeded."
+
                     else
-                       echo "ALERT: Production application is unavailable."
+
+                        echo "ALERT: Production application is unavailable."
+
                     fi
 
                     echo "Recovering production service..."
@@ -353,14 +362,12 @@ pipeline {
                         http://localhost:${PRODUCTION_PORT}/health
 
                     echo "INCIDENT RECOVERY: Production service restored."
-               '''
-         }
+                '''
+            }
+        }
     }
-               
-              
-    // =============================================================
-    // PIPELINE RESULT
-    // =============================================================
+
+
     post {
 
         success {
