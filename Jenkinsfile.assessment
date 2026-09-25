@@ -1,3 +1,4 @@
+```groovy
 pipeline {
     agent any
 
@@ -281,9 +282,9 @@ pipeline {
                         def responseTime = sh(
                             script: """
                                 curl -s -o /dev/null \
-                                -w '%{time_total}' \
-                                --max-time 10 \
-                                http://localhost:${PRODUCTION_PORT}/health
+                                    -w '%{time_total}' \
+                                    --max-time 10 \
+                                    http://localhost:${PRODUCTION_PORT}/health
                             """,
                             returnStdout: true
                         ).trim()
@@ -292,7 +293,7 @@ pipeline {
 
                         responseTimes.add(responseMs)
 
-                        echo "Metric sample ${i}: ${responseMs.round(2)} ms"
+                        echo "Metric sample ${i}: ${responseMs} ms"
                     }
 
                     def averageResponse =
@@ -301,9 +302,9 @@ pipeline {
                     def maximumResponse =
                         responseTimes.max()
 
-                    echo "Average response time: ${averageResponse.round(2)} ms"
+                    echo "Average response time: ${averageResponse} ms"
 
-                    echo "Maximum response time: ${maximumResponse.round(2)} ms"
+                    echo "Maximum response time: ${maximumResponse} ms"
 
                     echo 'Alert threshold: 1000 ms'
 
@@ -396,3 +397,4 @@ gate failed.
         }
     }
 }
+```
